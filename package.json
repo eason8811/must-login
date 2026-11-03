@@ -1,0 +1,45 @@
+{
+  "name": "@must/login",
+  "version": "0.1.0",
+  "description": "A TypeScript login toolkit with ESM and CommonJS entry points",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:consumer": "tsc --noEmit -p tsconfig.consumer.json",
+    "test": "pnpm run build && node --test",
+    "check": "pnpm run typecheck && pnpm run build && pnpm run typecheck:consumer && node --test",
+    "prepack": "pnpm run check"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^9.0.0",
+    "typescript": "^5.9.3"
+  }
+}
