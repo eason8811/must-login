@@ -6,11 +6,13 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const test = require('node:test');
 
-const { generateSign } = require('../dist/index.cjs');
+const { generateSign, generateCastleToken } = require('../dist/index.cjs');
 
 test('CommonJS require resolves the public SDK tool', async () => {
   assert.equal(typeof generateSign, 'function');
+  assert.equal(typeof generateCastleToken, 'function');
   await assert.rejects(generateSign(), /allowRemoteSdkExecution/);
+  await assert.rejects(generateCastleToken(), /allowRemoteSdkExecution/);
 });
 
 test('CommonJS require can execute the complete offline SDK chain', async () => {
@@ -52,6 +54,43 @@ test('CommonJS require can execute the complete offline SDK chain', async () => 
       },
     });
     assert.equal(signature, 'jf-PATCH');
+  } finally {
+    await rm(cacheDirectory, { recursive: true, force: true });
+  }
+});
+
+test('CommonJS require can discover the Castle SDK/key and generate a token', async () => {
+  const cacheDirectory = await mkdtemp(join(tmpdir(), 'must-login-castle-cjs-'));
+  const entry = 'https://abs.twimg.com/x-web/x-web/entry-client-logged-out-abc123.js';
+  const startup = 'https://abs.twimg.com/x-web/x-web/assets/hashed01.js';
+  const config = 'https://abs.twimg.com/x-web/x-web/assets/hashed02.js';
+  const sdk = 'https://abs.twimg.com/x-web/x-web/assets/hashed03.js';
+  const assets = new Map([
+    ['https://x.com/', [`<html><head><script>var entryHref = "${entry}";</script></head><body></body></html>`, 'text/html']],
+    [entry, ['import "./assets/hashed01.js";']],
+    [startup, [[
+      'import "./hashed02.js"; function DN(t) { if (!t.isTrue(`responsive_web_castle_sdk_enabled`)) return;',
+      'let n=t.getStringValue(`responsive_web_castle_public_key`);',
+      'return import(`./hashed03.js`).then(e => e.default.configure({pk:n})); }',
+    ].join('\n')]],
+    [config, ['export default { responsive_web_castle_public_key: `pk_CJS123456789` };']],
+    [sdk, ['export default { configure({pk}) {this.pk=pk;}, createRequestToken() {return this.pk;} };']],
+  ]);
+  const logger = { info() {}, warn() {}, error() {}, debug() {} };
+  try {
+    const token = await generateCastleToken({
+      allowRemoteSdkExecution: true,
+      logger,
+      cacheDirectory,
+      fetch: async url => {
+        const value = assets.get(String(url));
+        assert.ok(value, `Unexpected asset: ${url}`);
+        const result = new Response(value[0], { headers: { 'content-type': value[1] ?? 'text/javascript' } });
+        Object.defineProperty(result, 'url', { value: String(url) });
+        return result;
+      },
+    });
+    assert.equal(token, 'pk_CJS123456789');
   } finally {
     await rm(cacheDirectory, { recursive: true, force: true });
   }

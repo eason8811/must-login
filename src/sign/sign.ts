@@ -8,6 +8,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { CanvasAdapter } from '@happy-dom/node-canvas-adapter';
 import { init as initModuleLexer, parse as parseModule } from 'es-module-lexer';
 
+import { withExclusiveDom } from '../internal/dom-lock.js';
 import { installAnimationComputedStyleBridge, type AnimationWindow } from './animation.js';
 
 /** Log severity exposed to consumers of the signing tool. */
@@ -165,8 +166,6 @@ const NATIVE_FETCH = globalThis.fetch.bind(globalThis);
 /** Native AbortSignal constructor captured before Happy DOM registration. */
 const NATIVE_ABORT_SIGNAL = globalThis.AbortSignal;
 
-/** Promise used to serialize access to Node's mutable browser globals. */
-let lastDomOperation: Promise<void> = Promise.resolve();
 /** Import cache-busting counter, ensuring a new environment for each SDK run. */
 let importSequence = 0;
 
@@ -218,21 +217,6 @@ function resolveOptions(options: SignOptions): ResolvedSignOptions {
  */
 function debug(options: ResolvedSignOptions, message: string, details?: SignLogDetails): void {
   if (options.verbose) options.logger.debug?.(message, details);
-}
-
-/**
- * Serialize a task against other calls modifying Node browser globals.
- * @typeParam T - Type of the task's resolved result.
- * @param task - Asynchronous function requiring exclusive global DOM access.
- * @returns Result from the supplied task.
- */
-async function withExclusiveDom<T>(task: () => Promise<T>): Promise<T> {
-  const previous = lastDomOperation;
-  let release: () => void = () => {};
-  lastDomOperation = new Promise<void>(resolve => { release = resolve; });
-  await previous;
-  try { return await task(); }
-  finally { release(); }
 }
 
 /**

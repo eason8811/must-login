@@ -1,7 +1,7 @@
 {
   "name": "@must/login",
   "version": "0.1.0",
-  "description": "TypeScript X Sign SDK utility with ESM and CommonJS entry points",
+  "description": "TypeScript X Sign and Castle SDK utilities with ESM and CommonJS entry points",
   "private": true,
   "license": "UNLICENSED",
   "type": "module",

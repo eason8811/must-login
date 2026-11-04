@@ -9,3 +9,5 @@ const requestSignature: Promise<string | undefined> = login.generateSignForUrl('
   allowRemoteSdkExecution: true,
 });
 void requestSignature;
+const castleToken: Promise<string> = login.generateCastleToken({ allowRemoteSdkExecution: true });
+void castleToken;
