@@ -1,40 +1,130 @@
 # @must/login
 
-TypeScript 工具库项目骨架，构建产物同时支持 **ESM `import`**、**CommonJS `require`** 和 TypeScript 类型提示。
+基于 TypeScript 的 X Sign SDK 签名工具函数。自动获取当前 HTML，追踪与之匹配的 `entry-client-logged-out → startup-dynamic → sign.o-*` 引用链，在 Happy DOM 中初始化 SDK，并返回签名字符串。
 
-> 当前代码是演示性质的登录适配器，不包含实际的登录 HTTP 协议、Token 存储、密码校验或加密逻辑。请按照真实业务需求替换 `src/login.ts`。
+同时提供 ESM、CommonJS 和对应的 TypeScript 类型声明。
 
-## 环境
+> 运行环境：**Node.js 22+**。本工具会加载第三方动态 JavaScript，只应在你确认具有相关授权、信任下载来源及可接受运行风险的环境中使用。`allowRemoteSdkExecution` 必须明确设置为 `true`，避免误执行远程代码。
 
-- Node.js 20+
-- pnpm（建议使用团队统一的版本）
-
-本项目的 `pnpm-workspace.yaml` 仅允许 `esbuild` 执行依赖安装脚本（pnpm 11+ 的构建审批机制），不对其他依赖开放执行权限。
-
-## 开发
+## 安装与验证
 
 ```bash
 pnpm install
-pnpm run typecheck
-pnpm run build
-pnpm run typecheck:consumer
-pnpm test
-```
-
-开发监听：
-
-```bash
-pnpm dev
-```
-
-发布前完整检查：
-
-```bash
 pnpm check
 pnpm pack
 ```
 
-`prepack` 会在打包前自动运行 `check`（源码类型检查、构建、双模块消费者类型检查及 ESM/CJS 运行测试）。
+- `pnpm build`：使用 tsup 构建 ESM + CJS + 类型声明。
+- `pnpm dev`：监听源码变化。
+- `pnpm check`：源码类型检查、ESM/CJS 消费者类型检查、构建、运行时测试。
+- `pnpm pack`：自动执行 `check` 并创建可安装的 `.tgz` 压缩包。
+
+pnpm 11+ 的依赖构建脚本审批由 `pnpm-workspace.yaml` 管理。本项目明确允许 `esbuild` 和 `canvas` 运行构建脚本；Canvas 可能需要当前操作系统的原生依赖或预编译二进制。
+
+## API
+
+```ts
+import { generateSign, generateSignForUrl, type SignOptions } from '@must/login';
+
+const options: SignOptions = {
+  allowRemoteSdkExecution: true,
+  verbose: false,
+};
+
+// 默认参数：input='jf', method='PATCH'
+const signature = await generateSign('jf', 'PATCH', options);
+
+// 可通过其他合法输入调用 SDK；方法会转成大写
+const otherSignature = await generateSign('/i/api/example', 'get', options);
+
+// 根据 URL 自动决定是否需要签名，并处理 jf.x.com 的 jf/PATCH 特例
+const requestSignature = await generateSignForUrl('https://jf.x.com/any/path', 'GET', options);
+```
+
+CommonJS：
+
+```js
+const { generateSign } = require('@must/login');
+
+const signature = await generateSign('jf', 'PATCH', {
+  allowRemoteSdkExecution: true,
+});
+```
+
+参数说明：
+
+```ts
+generateSign(
+  input?: string,        // 默认 'jf'
+  method?: string,       // 默认 'PATCH'，内部统一转换成大写
+  options?: SignOptions, // 默认仅使用关键日志，不允许执行远程代码
+): Promise<string>
+```
+
+`generateSignForUrl(url, method, options)` 会先使用 `shouldGenerateSign(url)` 检查 URL，若不在支持的请求范围内就返回 `undefined`，不会执行网络请求；对于 `jf.x.com` 及其子域名自动采用固定的 `jf/PATCH` 参数。
+
+签名失败时**抛出异常**，而不是把错误包装成 Base64 字符串。这能避免错误结果被误作为真实签名提交。工具不会将签名值打印到日志。
+
+### SignOptions
+
+| 属性 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `allowRemoteSdkExecution` | `boolean` | `false` | 显式允许导入并执行远程 SDK |
+| `verbose` | `boolean` | `false` | 是否显示详细资源/DOM/动画日志 |
+| `fetchTimeoutMs` | `number` | `15000` | HTML 下载超时，毫秒 |
+| `sdkFetchTimeoutMs` | `number` | `15000` | 每个 JavaScript 资源下载超时，毫秒 |
+| `signTimeoutMs` | `number` | `15000` | SDK 签名 Promise 超时，毫秒 |
+| `htmlHeaders` | `Record<string,string>` | `{}` | HTML 请求 Header 覆盖项 |
+| `sdkHeaders` | `Record<string,string>` | `{}` | CDN JavaScript 请求 Header 覆盖项 |
+| `cacheDirectory` | `string` | OS 临时目录下的 `must-login-sign` | SDK 快照缓存目录 |
+| `logger` | `SignLogger` | 控制台 | 自定义日志输出端 |
+| `fetch` | `typeof globalThis.fetch` | Node 原生 fetch | 可注入网络实现，便于配置网络出口或离线测试 |
+
+所有公开的 `interface`、`type` 和函数都带有 TSDoc。将鼠标悬停在 IDE 中的 `SignOptions`、`SignLogger`、`generateSign` 上即可查看类型及说明。
+
+### 自定义日志
+
+```ts
+const signature = await generateSign('jf', 'PATCH', {
+  allowRemoteSdkExecution: true,
+  verbose: true,
+  logger: {
+    info: (message, details) => console.info(message, details),
+    warn: (message, details) => console.warn(message, details),
+    error: (message, details) => console.error(message, details),
+    debug: (message, details) => console.debug(message, details),
+  },
+});
+```
+
+默认仅报告 HTML/SDK 发现阶段、SDK 下载、签名成功及异常；`verbose=true` 时才报告 URL、指纹、DOM 结构和动画采样。**不会记录**完整签名、HTML 内容、认证 meta 值或 SVG path 正文。
+
+## 从原始入口迁移的配置
+
+| 原环境变量/模式 | 当前处理方式 |
+|---|---|
+| `SIGN_INPUT`、`SIGN_METHOD` | 改为 `generateSign(input, method, options)`，默认 `'jf', 'PATCH'` |
+| `SIGN_FETCH_TIMEOUT_MS` | `options.fetchTimeoutMs` |
+| `SIGN_SDK_FETCH_TIMEOUT_MS` | `options.sdkFetchTimeoutMs` |
+| `SIGN_TIMEOUT_MS` | `options.signTimeoutMs` |
+| `SIGN_HEADERS_JSON` | `options.htmlHeaders` |
+| `SIGN_SDK_FETCH_HEADERS_JSON` | `options.sdkHeaders` |
+| `SIGN_ALLOW_REMOTE_SDK_EXECUTION` | `options.allowRemoteSdkExecution`，安全默认 `false` |
+| `SIGN_MODE` | 移除 `probe/fetch/import/initialize`，仅保留完整签名流程 |
+| `SIGN_SDK_SOURCE`、SDK 本地路径和固定 URL | 移除，始终从当前 HTML 自动发现配套 SDK |
+| `SIGN_FETCH_URL` | 固定为 `https://x.com/` |
+| `SIGN_SVG_SELECTOR`、`SIGN_STRICT_DOM` | 内部常量，启用稳定 SVG 结构检查 |
+| 动画桥接、监控、探针和 settle 开关 | 桥接固定开启，探索期监控/探针/等待逻辑移除 |
+| SDK/HTML 期望哈希和发现资源快照 | 移除；SDK 源文件仅以 SHA-256 命名缓存用于 Node 导入 |
+| `SIGN_SHOW_RESULT`、JSONL 日志 | 移除；返回签名值，日志永不打印签名正文 |
+
+## 重要运行特征
+
+1. **独立的 HTML + SDK 配套链**：每次调用都重新获取 HTML 和相应 SDK；下载过程中对 CDN 主机名、HTTPS 和路径形态做限制。由于 CDN 更新不是原子事务，极端情况下仍可能出现跨部署版本不一致。
+2. **Happy DOM 是全局环境**：初始化会暂时修改 Node `globalThis`。本包将内部调用串行化，并在结束后撤销动画桥接、注销浏览器环境；不建议与同进程中其他使用全局 DOM 的工具并发运行。
+3. **动态导入隔离**：为避免使用与上次 DOM 绑定的模块缓存，每次调用都以不同的模块 URL 查询参数重新导入 SDK。长时间高频调用可能增加模块缓存内存；生产高吞吐场景应考虑后续引入专用 Worker/进程池以及复用式签名会话。
+4. **超时不是执行取消**：`signTimeoutMs` 只能让调用方及时收到异常，不能强制终止正在运行的第三方 JavaScript。强隔离和硬超时需要独立进程。
+5. **实际 SDK 兼容性**：仓库包含离线模拟 HTML/SDK 的端到端测试；不同日期、部署版本的真实 SDK 仍需与真实浏览器产生的签名对照验证。
 
 ## 构建产物
 
@@ -42,89 +132,9 @@ pnpm pack
 dist/
 ├── index.js       # ESM
 ├── index.cjs      # CommonJS
-├── index.d.ts     # ESM TypeScript 声明
-├── index.d.cts    # CommonJS TypeScript 声明
+├── index.d.ts     # ESM 类型声明
+├── index.d.cts    # CommonJS 类型声明
 └── *.map          # Source maps
 ```
 
-`package.json` 中的条件导出分别指向相应的运行时和类型入口。`files` 白名单确保 npm 包主要包含 `dist` 产物及 npm 自动包含的必要元信息。
-
-## 消费者使用示例
-
-ESM：
-
-```ts
-import { createLoginClient } from '@must/login';
-
-const loginClient = createLoginClient(async ({ username, password }) => {
-  // 此处接入你的真实认证服务；不要在日志中输出密码。
-  void password;
-  return { user: username, accessToken: 'example-only' };
-});
-
-const result = await loginClient.login({
-  username: 'eason',
-  password: 'example',
-});
-console.log(result.user);
-```
-
-CommonJS：
-
-```js
-const { createLoginClient } = require('@must/login');
-
-const loginClient = createLoginClient(async ({ username }) => ({ user: username }));
-```
-
-## 本地安装测试
-
-在项目目录执行：
-
-```bash
-pnpm pack
-```
-
-然后在**另一个项目**使用生成的 `must-login-0.1.0.tgz` 文件，例如：
-
-```bash
-pnpm add ../must-login/must-login-0.1.0.tgz
-```
-
-注意：示例中的路径需根据实际目录调整。建议测试 `import`、`require`，以及 TypeScript 的 `moduleResolution: NodeNext` 模式。
-
-## 对外发布前
-
-此骨架默认设置了 `"private": true` 和 `"license": "UNLICENSED"`，用于防止误发布并保留许可证决策。
-
-如果决定正式发布：
-
-1. 确认你拥有 npm Registry 上的 `@must` 命名空间或组织发布权限；如无权限，修改 `name`。
-2. 根据项目实际使用授权，确定 `license`；若希望开源，请添加相应 LICENSE 文件。
-3. 确认确实允许发布后，将 `private` 改为 `false`（或移除该字段）。
-4. 运行 `pnpm check`、`pnpm pack`，检查压缩包中不含密钥或隐私数据。
-5. 根据 Registry 的身份认证与权限要求，运行：
-
-```bash
-pnpm login --registry=https://registry.npmjs.org/
-pnpm publish --dry-run
-pnpm publish --access public
-```
-
-## 常见扩展
-
-- 需要浏览器运行：调整 `platform` 和入口设计，避免把 Node.js 专用模块打进浏览器构建。
-- 需要子路径导出：新增 `src` 入口并同步修改 `exports`。
-- 需要真实鉴权：实现具体适配器，明确超时、异常、凭据处理与 Token 生命周期。
-- 需要 CI 发布：测试稳定后引入 GitHub Actions / GitLab CI 和受信任的发布机制。
-
-## 目录
-
-```text
-src/            TypeScript 源代码（只在 index.ts 中暴露公共 API）
-test/           ESM 和 CommonJS 运行时烟雾测试
-type-tests/     ESM 和 CommonJS TypeScript 消费者类型检查
-dist/           构建输出（不提交 Git）
-tsup.config.ts  双格式构建配置
-tsconfig.json   TypeScript 严格类型检查
-```
+> 初始发布配置仍为 `private: true`、`license: "UNLICENSED"`。确认拥有 npm 的 `@must` scope 发布权限并明确许可证后，才能调整为公开发布。

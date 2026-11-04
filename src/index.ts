@@ -1,3 +1,3 @@
-// Only export public, supported APIs from this barrel file.
-export { createLoginClient } from './login.js';
-export type { LoginClient, LoginCredentials, LoginHandler } from './login.js';
+/** Public ESM/CJS entry point for the signing tool. */
+export { generateSign, generateSignForUrl, shouldGenerateSign } from './sign/sign.js';
+export type { SignLogDetails, SignLogger, SignLogLevel, SignOptions } from './sign/sign.js';
