@@ -24,12 +24,23 @@ function fixtureHtml(entryUrl) {
 test('ESM import fetches the paired SDK and produces a sign with quiet logs', async () => {
   const cacheDirectory = await mkdtemp(join(tmpdir(), 'must-login-test-'));
   const entryUrl = 'https://abs.twimg.com/x-web/x-web/entry-client-logged-out-a1.js';
-  const startupUrl = 'https://abs.twimg.com/x-web/x-web/assets/startup-dynamic-b2.js';
-  const sdkUrl = 'https://abs.twimg.com/x-web/x-web/assets/sign.o-c3.js';
+  const decoyUrl = 'https://abs.twimg.com/x-web/x-web/assets/BMpThmqI.js';
+  const startupUrl = 'https://abs.twimg.com/x-web/x-web/assets/dSSXoMgG.js';
+  const sdkUrl = 'https://abs.twimg.com/x-web/x-web/assets/CYgkI3Mb.js';
   const data = new Map([
     ['https://x.com/', [fixtureHtml(entryUrl), 'text/html']],
-    [entryUrl, ['export const next = "./assets/startup-dynamic-b2.js";', 'text/javascript']],
-    [startupUrl, ['export const sdk = "./sign.o-c3.js";', 'text/javascript']],
+    [entryUrl, [
+      'const __vite__mapDeps = i => ["assets/ignored.js"];\n' +
+      'import { value as irrelevant } from "./assets/BMpThmqI.js";\n' +
+      'import { value as dispatcher } from "./assets/dSSXoMgG.js";',
+      'text/javascript',
+    ]],
+    [decoyUrl, ['export const value = "unrelated module";', 'text/javascript']],
+    [startupUrl, [
+      'function Zm() { return import(`./CYgkI3Mb.js`).then(e => e.default()); }\n' +
+      'function Qm(e) { return e === `jf.x.com` || e.endsWith(`.jf.x.com`) ? `PATCH` : `GET`; }',
+      'text/javascript',
+    ]],
     [sdkUrl, ['export default async function () { return (input, method) => `${input}|${method}`; }', 'text/javascript']],
   ]);
   const logs = [];
@@ -79,4 +90,30 @@ test('ESM import fetches the paired SDK and produces a sign with quiet logs', as
   } finally {
     await rm(cacheDirectory, { recursive: true, force: true });
   }
+});
+
+test('hashed Startup discovery refuses ambiguous signature candidates', async () => {
+  const entryUrl = 'https://abs.twimg.com/x-web/x-web/entry-client-logged-out-a1.js';
+  const firstUrl = 'https://abs.twimg.com/x-web/x-web/assets/AAA11111.js';
+  const secondUrl = 'https://abs.twimg.com/x-web/x-web/assets/BBB22222.js';
+  const marker = 'const host = `jf.x.com`, child = `.jf.x.com`, method = `PATCH`;';
+  const fixtures = new Map([
+    ['https://x.com/', [fixtureHtml(entryUrl), 'text/html']],
+    [entryUrl, ['import "./assets/AAA11111.js"; import "./assets/BBB22222.js";', 'text/javascript']],
+    [firstUrl, [marker, 'text/javascript']],
+    [secondUrl, [marker, 'text/javascript']],
+  ]);
+  const logger = { info() {}, warn() {}, error() {}, debug() {} };
+  await assert.rejects(
+    generateSign('jf', 'PATCH', {
+      allowRemoteSdkExecution: true,
+      logger,
+      fetch: async url => {
+        const value = fixtures.get(String(url));
+        assert.ok(value);
+        return response(String(url), ...value);
+      },
+    }),
+    /无法唯一确定签名调用模块，候选数量：2/,
+  );
 });

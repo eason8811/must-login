@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { CanvasAdapter } from '@happy-dom/node-canvas-adapter';
+import { init as initModuleLexer, parse as parseModule } from 'es-module-lexer';
 
 import { installAnimationComputedStyleBridge, type AnimationWindow } from './animation.js';
 
@@ -252,16 +253,13 @@ function sha256(content: string | Buffer): string {
  */
 function validateCdnAssetUrl(value: string | URL, kind: AssetKind): URL {
   const url = new URL(value);
-  const hashedAssetPattern =
-    /^\/x-web\/x-web\/assets\/[A-Za-z0-9_-]+\.js$/;
-
+  // Startup and Sign SDK assets no longer have semantic filename prefixes.
+  // Their roles must be established by inspecting the module graph/content.
+  const hashedAssetPath = /^\/x-web\/x-web\/assets\/[A-Za-z0-9_-]+\.js$/;
   const paths: Record<AssetKind, RegExp> = {
-    entry:
-      /^\/x-web\/x-web\/entry-client-logged-out-[A-Za-z0-9_-]+\.js$/,
-
-    startup: hashedAssetPattern,
-
-    sdk: hashedAssetPattern,
+    entry: /^\/x-web\/x-web\/entry-client-logged-out-[A-Za-z0-9_-]+\.js$/,
+    startup: hashedAssetPath,
+    sdk: hashedAssetPath,
   };
   if (url.protocol !== 'https:' || url.hostname !== 'abs.twimg.com' ||
       url.username || url.password || url.port || url.search || url.hash ||
@@ -426,13 +424,64 @@ async function fetchAsset(
   return asset;
 }
 
+/** Maximum number of direct Entry imports eligible for Startup inspection. */
+const MAX_STARTUP_CANDIDATES = 32;
+
 /**
- * Follow the exact HTML → entry-client-logged-out → startup-dynamic → sign.o chain.
- * Only string references are inspected; the first two modules are not executed.
+ * Extract hash-named JavaScript files referenced by static ESM imports.
+ *
+ * The lexer ignores filename strings used only by Vite's preload dependency
+ * table, which are not necessarily direct imports of the Entry module.
+ *
+ * @param source - JavaScript source of the Entry module.
+ * @param baseUrl - Absolute URL of the Entry module.
+ * @returns Distinct CDN URLs in import order.
+ * @throws {Error} If a referenced CDN asset violates the allowed URL rules.
+ */
+async function extractStaticChunkUrls(source: string, baseUrl: URL): Promise<URL[]> {
+  await initModuleLexer();
+  const [imports] = parseModule(source);
+  const urls = new Map<string, URL>();
+
+  for (const item of imports) {
+    if (item.type !== 'static' || item.typeOnly) continue;
+    const specifier = item.specifier;
+    if (!/^\.\/assets\/[A-Za-z0-9_-]+\.js$/.test(specifier)) continue;
+    const url = validateCdnAssetUrl(new URL(specifier, baseUrl), 'startup');
+    urls.set(url.href, url);
+  }
+  return [...urls.values()];
+}
+
+/**
+ * Identify a candidate Sign callsite using observed JF request constants.
+ *
+ * This is a conservative content fingerprint, not proof that a module is the
+ * signature dispatcher; ambiguous candidates are rejected by discoverSdk().
+ *
+ * @param source - JavaScript module source to inspect without executing.
+ * @returns True when all three observed signing branch markers are present.
+ */
+function looksLikeSignStartup(source: string): boolean {
+  return (
+    /["'`]jf\.x\.com["'`]/.test(source) &&
+    /["'`]\.jf\.x\.com["'`]/.test(source) &&
+    /["'`]PATCH["'`]/.test(source)
+  );
+}
+
+/**
+ * Follow the current HTML Entry into its directly imported hashed JS chunks.
+ *
+ * Identify the unique Sign dispatcher by observed JF/PATCH branch markers,
+ * then extract the literal dynamic import whose resolved default export is
+ * invoked as the signer factory. No downloaded Entry/Startup source is executed.
+ *
  * @param html - Current X HTML document text.
- * @param options - Network settings for fetching referenced scripts.
- * @returns SDK URL and matching startup referrer.
- * @throws {Error} When a reference is absent or ambiguous.
+ * @param options - Network and diagnostics settings for fetching candidates.
+ * @returns SDK URL and matching startup module referrer.
+ * @throws {Error} When there are no candidates, too many candidates, or
+ * the content cannot uniquely identify the Startup/SDK references.
  */
 async function discoverSdk(html: string, options: ResolvedSignOptions): Promise<SdkDiscovery> {
   const entryUrl = extractUniqueReference(
@@ -441,18 +490,33 @@ async function discoverSdk(html: string, options: ResolvedSignOptions): Promise<
     'HTML 中的 entry-client-logged-out',
   );
   const entry = await fetchAsset(entryUrl, 'entry', HTML_URL, options);
-  const startupSpecifier = extractUniqueReference(
-    entry.content,
-    /["'`](\.\/assets\/startup-dynamic-[A-Za-z0-9_-]+\.js)["'`]/g,
-    'entry 中的 startup-dynamic',
-  );
-  const startup = await fetchAsset(new URL(startupSpecifier, entry.url), 'startup', entry.url.href, options);
+  const candidates = await extractStaticChunkUrls(entry.content, entry.url);
+
+  debug(options, 'Entry 静态依赖解析完成', { count: candidates.length });
+  if (candidates.length === 0 || candidates.length > MAX_STARTUP_CANDIDATES) {
+    throw new Error(`Entry 静态依赖数量异常：${candidates.length}`);
+  }
+
+  const matches: CdnAsset[] = [];
+  for (const candidate of candidates) {
+    const asset = await fetchAsset(candidate, 'startup', entry.url.href, options);
+    const matched = looksLikeSignStartup(asset.content);
+    debug(options, 'Startup 候选分析', { url: asset.url.href, matched });
+    if (matched) matches.push(asset);
+  }
+
+  if (matches.length !== 1) {
+    throw new Error(`无法唯一确定签名调用模块，候选数量：${matches.length}`);
+  }
+
+  const startup = matches[0]!;
   const sdkSpecifier = extractUniqueReference(
     startup.content,
-    /["'`](\.\/sign\.o-[A-Za-z0-9_-]+\.js)["'`]/g,
-    'startup 中的 sign.o',
+    /\bimport\s*\(\s*["'`](\.\/[A-Za-z0-9_-]+\.js)["'`]\s*\)\s*\.then\s*\(\s*([A-Za-z_$][\w$]*)\s*=>\s*\2\.default\s*\(\s*\)\s*\)/g,
+    '签名调用模块中的 SDK 动态导入',
   );
   const sdkUrl = validateCdnAssetUrl(new URL(sdkSpecifier, startup.url), 'sdk');
+
   debug(options, 'SDK 引用链匹配成功', {
     entryUrl: entry.url.href,
     startupUrl: startup.url.href,

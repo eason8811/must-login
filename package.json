@@ -44,6 +44,7 @@
   },
   "dependencies": {
     "@happy-dom/global-registrator": "^21.0.4",
-    "@happy-dom/node-canvas-adapter": "^21.0.4"
+    "@happy-dom/node-canvas-adapter": "^21.0.4",
+    "es-module-lexer": "^3.0.4"
   }
 }
