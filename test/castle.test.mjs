@@ -14,12 +14,14 @@ function response(url, source, type = 'text/javascript') {
 }
 
 /** Create the current HTML / Entry / Startup / key / SDK discovery fixtures. */
-function castleFixtures({ duplicateKey = false, duplicateStartup = false } = {}) {
+function castleFixtures({ duplicateKey = false, duplicateStartup = false, withRuntimeDependency = false } = {}) {
   const entryUrl = 'https://abs.twimg.com/x-web/x-web/entry-client-logged-out-BadkwjBO.js';
   const startupUrl = 'https://abs.twimg.com/x-web/x-web/assets/dSSXoMgG.js';
   const configUrl = 'https://abs.twimg.com/x-web/x-web/assets/BMpThmqI.js';
   const irrelevantUrl = 'https://abs.twimg.com/x-web/x-web/assets/irrelEvA.js';
   const castleUrl = 'https://abs.twimg.com/x-web/x-web/assets/2R3RE05z.js';
+  const runtimeUrl = 'https://abs.twimg.com/x-web/x-web/assets/cnfsMYm8.js';
+  const nestedRuntimeUrl = 'https://abs.twimg.com/x-web/x-web/assets/childAb12.js';
   const secondStartup = 'https://abs.twimg.com/x-web/x-web/assets/secoNd01.js';
   const key = 'pk_AvRa79bHyJSYSQHnRpcVtzyxetSvFerx';
   const html = `<html><head><script>var entryHref = "${entryUrl}";</script></head><body></body></html>`;
@@ -47,12 +49,26 @@ function castleFixtures({ duplicateKey = false, duplicateStartup = false } = {})
       ? 'export const irrelevant = {responsive_web_castle_public_key: `pk_DIFFERENTKEY1234567`};'
       : 'export const irrelevant = true;']],
     [castleUrl, [
+      (withRuntimeDependency ? 'import { capturedWindow } from "./cnfsMYm8.js";\n' : '') +
       'export default {' +
       ' configure({pk}) { return {createRequestToken: async () => `castle-token:${pk}`}; },' +
       ' createRequestToken() { return "unconfigured"; }' +
       '};',
     ]],
   ]);
+  if (withRuntimeDependency) {
+    fixture.set(runtimeUrl, ['export { capturedWindow } from "./childAb12.js";']);
+    fixture.set(nestedRuntimeUrl, ['export const capturedWindow = globalThis.window;']);
+    fixture.set(castleUrl, [
+      'import { capturedWindow } from "./cnfsMYm8.js";\n' +
+      'export default {' +
+      ' configure({pk}) {return {' +
+      '   createRequestToken: () => capturedWindow === globalThis.window ? `castle-token:${pk}` : "STALE_DOM"' +
+      ' };},' +
+      ' createRequestToken() {return "unconfigured";}' +
+      '};',
+    ]);
+  }
   if (duplicateStartup) fixture.set(secondStartup, [startup]);
   return { fixture, key };
 }
@@ -106,6 +122,55 @@ test('Castle ESM discovers SDK and version-matched pk, configures and creates to
 
 test('Castle remote code execution requires an explicit opt-in', async () => {
   await assert.rejects(generateCastleToken(), /allowRemoteSdkExecution/);
+});
+
+test('Castle downloads a nested ESM runtime graph and rebinds dependencies to every fresh DOM', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'must-login-castle-deps-'));
+  const { fixture, key } = castleFixtures({ withRuntimeDependency: true });
+  const debugEvents = [];
+  const logger = {
+    info() {}, warn() {}, error() {},
+    debug(message, details) { debugEvents.push([message, details]); },
+  };
+  try {
+    const options = {
+      allowRemoteSdkExecution: true,
+      cacheDirectory: directory,
+      fetch: fetchFor(fixture),
+      verbose: true,
+      logger,
+    };
+    const first = await generateCastleToken(options);
+    const second = await generateCastleToken(options);
+    assert.equal(first, `castle-token:${key}`);
+    assert.equal(second, first, 'Dependencies must capture the current DOM on each run');
+    const bundles = debugEvents
+      .filter(([event]) => event === 'Castle SDK 依赖图下载完成')
+      .map(([, details]) => details);
+    assert.equal(bundles.length, 2);
+    assert.deepEqual(bundles.map(info => info.moduleCount), [3, 3]);
+    assert.notEqual(bundles[0].bundleDirectory, bundles[1].bundleDirectory);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('Castle rejects an SDK dependency that escapes the restricted CDN path', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'must-login-castle-unsafe-'));
+  const { fixture } = castleFixtures();
+  const sdkUrl = 'https://abs.twimg.com/x-web/x-web/assets/2R3RE05z.js';
+  fixture.set(sdkUrl, ['import { value } from "../unexpected.js"; export default {configure() {}, createRequestToken() {}};']);
+  const logger = { info() {}, warn() {}, error() {}, debug() {} };
+  try {
+    await assert.rejects(generateCastleToken({
+      allowRemoteSdkExecution: true,
+      cacheDirectory: directory,
+      fetch: fetchFor(fixture),
+      logger,
+    }), /不支持的模块引用/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('Castle rejects ambiguous Startup and conflicting pk candidates', async () => {

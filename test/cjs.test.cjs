@@ -65,6 +65,7 @@ test('CommonJS require can discover the Castle SDK/key and generate a token', as
   const startup = 'https://abs.twimg.com/x-web/x-web/assets/hashed01.js';
   const config = 'https://abs.twimg.com/x-web/x-web/assets/hashed02.js';
   const sdk = 'https://abs.twimg.com/x-web/x-web/assets/hashed03.js';
+  const runtime = 'https://abs.twimg.com/x-web/x-web/assets/cnfsMYm8.js';
   const assets = new Map([
     ['https://x.com/', [`<html><head><script>var entryHref = "${entry}";</script></head><body></body></html>`, 'text/html']],
     [entry, ['import "./assets/hashed01.js";']],
@@ -74,7 +75,11 @@ test('CommonJS require can discover the Castle SDK/key and generate a token', as
       'return import(`./hashed03.js`).then(e => e.default.configure({pk:n})); }',
     ].join('\n')]],
     [config, ['export default { responsive_web_castle_public_key: `pk_CJS123456789` };']],
-    [sdk, ['export default { configure({pk}) {this.pk=pk;}, createRequestToken() {return this.pk;} };']],
+    [sdk, [
+      'import { runtimeName } from "./cnfsMYm8.js";\n' +
+      'export default { configure({pk}) {this.pk=pk;}, createRequestToken() {return `${this.pk}:${runtimeName}`;} };',
+    ]],
+    [runtime, ['export const runtimeName = "cjs-runtime";']],
   ]);
   const logger = { info() {}, warn() {}, error() {}, debug() {} };
   try {
@@ -90,7 +95,7 @@ test('CommonJS require can discover the Castle SDK/key and generate a token', as
         return result;
       },
     });
-    assert.equal(token, 'pk_CJS123456789');
+    assert.equal(token, 'pk_CJS123456789:cjs-runtime');
   } finally {
     await rm(cacheDirectory, { recursive: true, force: true });
   }

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -33,7 +33,7 @@ export interface CastleOptions {
   htmlHeaders?: Readonly<Record<string, string>>;
   /** Additional HTTP headers for requests to the X CDN. */
   sdkHeaders?: Readonly<Record<string, string>>;
-  /** Immutable SDK snapshot directory. Default: `must-login-castle` under the OS temporary folder. */
+  /** Directory for isolated SDK module graphs. Default: `must-login-castle` under the OS temporary folder. */
   cacheDirectory?: string;
   /** Optional logger. Verbose events are emitted through its `debug` method only. */
   logger?: CastleLogger;
@@ -117,6 +117,10 @@ const MAX_HTML_BYTES = 5 * 1024 * 1024;
 const MAX_JS_BYTES = 10 * 1024 * 1024;
 /** Maximum number of imports to inspect at each discovery level. */
 const MAX_IMPORT_CANDIDATES = 64;
+/** Maximum number of distinct modules downloaded for one Castle SDK run. */
+const MAX_SDK_MODULES = 64;
+/** Maximum total bytes allowed for a Castle SDK module graph (50 MiB). */
+const MAX_SDK_GRAPH_BYTES = 50 * 1024 * 1024;
 /** Browser-like user agent for the latest X HTML and CDN. */
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36';
 /** Browser client hints used by the HTML request. */
@@ -416,20 +420,69 @@ async function discoverCastle(html: string, options: ResolvedCastleOptions): Pro
 }
 
 /**
- * Store SDK source under a deterministic immutable local filename.
- * @param asset - Verified downloaded SDK.
- * @param cacheDirectory - Configured private cache directory.
- * @returns Absolute `.mjs` pathname safe for `import()`.
+ * Download and save the Castle SDK together with its relative ESM dependencies.
+ *
+ * Castle is a multi-file module: loading only the SDK entry leaves its static
+ * imports (such as the Rolldown runtime chunk) missing on the local disk.
+ * The downloaded dependency graph is saved with original CDN basenames to
+ * preserve relative specifiers. A unique directory is created on every call
+ * so that transitive modules never reuse browser globals from a previous run.
+ *
+ * @param rootAsset - Downloaded and validated Castle SDK entry module.
+ * @param options - Network, cache location, and diagnostic settings.
+ * @returns Absolute pathname of the SDK entry module in its local graph.
+ * @throws {Error} When a module reference is unsupported, downloading fails,
+ * or the graph exceeds size/count limits.
  */
-async function persistSdk(asset: CastleAsset, cacheDirectory: string): Promise<string> {
-  const filePath = resolve(cacheDirectory, `sdk-${asset.hash}.mjs`);
-  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
-  try { await writeFile(filePath, asset.content, { flag: 'wx', mode: 0o600 }); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    if (sha256(await readFile(filePath)) !== asset.hash) throw new Error('Castle SDK 缓存文件的 SHA-256 不匹配');
+async function persistSdkBundle(rootAsset: CastleAsset, options: ResolvedCastleOptions): Promise<string> {
+  await initModuleLexer();
+  await mkdir(options.cacheDirectory, { recursive: true, mode: 0o700 });
+
+  const bundleDirectory = await mkdtemp(resolve(options.cacheDirectory, `castle-${rootAsset.hash.slice(0, 12)}-`));
+  // CDN imports use .js extensions, so declare their ESM interpretation
+  // explicitly even when the cache is outside the package directory.
+  await writeFile(resolve(bundleDirectory, 'package.json'), '{"type":"module"}\n', { flag: 'wx', mode: 0o600 });
+
+  const queue: CastleAsset[] = [rootAsset];
+  const visited = new Set<string>([rootAsset.url.href]);
+  let totalBytes = 0;
+
+  for (let index = 0; index < queue.length; index++) {
+    const current = queue[index]!;
+    const filename = basename(current.url.pathname);
+    if (!/^[A-Za-z0-9_-]+\.js$/.test(filename)) {
+      throw new Error(`Castle SDK 模块文件名不符合预期：${filename}`);
+    }
+
+    totalBytes += Buffer.byteLength(current.content);
+    if (totalBytes > MAX_SDK_GRAPH_BYTES) throw new Error('Castle SDK 依赖总大小超过限制');
+    await writeFile(resolve(bundleDirectory, filename), current.content, { flag: 'wx', mode: 0o600 });
+
+    const [imports] = parseModule(current.content);
+    for (const item of imports) {
+      if (item.type !== 'static' && item.type !== 'dynamic') continue;
+      const specifier = item.specifier;
+      if (typeof specifier !== 'string') {
+        debug(options, 'SDK 存在无法静态分析的动态导入', { module: filename });
+        continue;
+      }
+      if (!/^\.\/[A-Za-z0-9_-]+\.js$/.test(specifier)) {
+        throw new Error(`Castle SDK 存在不支持的模块引用：${specifier}`);
+      }
+      const dependencyUrl = validateAssetUrl(new URL(specifier, current.url), 'chunk');
+      if (visited.has(dependencyUrl.href)) continue;
+      if (visited.size >= MAX_SDK_MODULES) throw new Error('Castle SDK 依赖模块数量超过限制');
+      visited.add(dependencyUrl.href);
+      queue.push(await fetchAsset(dependencyUrl, 'chunk', current.url.href, options));
+    }
   }
-  return filePath;
+
+  debug(options, 'Castle SDK 依赖图下载完成', {
+    moduleCount: visited.size,
+    totalBytes,
+    bundleDirectory,
+  });
+  return resolve(bundleDirectory, basename(rootAsset.url.pathname));
 }
 
 /**
@@ -457,7 +510,7 @@ function disableResourceLoading(window: CastleWindow): void {
 
 /**
  * Import and validate the remote Castle SDK after Happy DOM has been registered.
- * @param filePath - Content-addressed local SDK module path.
+ * @param filePath - Local entry file of the complete Castle SDK module graph.
  * @returns SDK default export with configure and createRequestToken methods.
  */
 async function importCastleSdk(filePath: string): Promise<CastleSdk> {
@@ -525,8 +578,8 @@ export async function generateCastleToken(options: CastleOptions = {}): Promise<
       const html = await fetchHtml(settings);
       const { sdkUrl, referer, publicKey } = await discoverCastle(html, settings);
       const asset = await fetchAsset(sdkUrl, 'sdk', referer, settings);
-      const sdkPath = await persistSdk(asset, settings.cacheDirectory);
-      settings.logger.info('Castle SDK 下载完成', { sha256: asset.hash.slice(0, 12) });
+      const sdkPath = await persistSdkBundle(asset, settings);
+      settings.logger.info('Castle SDK 及依赖下载完成', { sha256: asset.hash.slice(0, 12) });
 
       // All HTTP work finishes before Happy DOM overrides Node global classes.
       GlobalRegistrator.register({ url: HTML_URL, width: 1920, height: 1080 });
