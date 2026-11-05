@@ -544,7 +544,9 @@ function disableAutomaticResourceLoading(window: SignBrowserWindow): void {
     enableCSSFileLoading: false,
     disableCSSFileLoading: true,
     enableImageFileLoading: false,
-    enableIframePageLoading: false,
+    // 允许 iframe 创建并加载页面
+    enableIframePageLoading: true,
+    disableIframePageLoading: false,
     handleDisabledFileLoadingAsSuccess: true,
   };
   for (const [key, value] of Object.entries(overrides)) {

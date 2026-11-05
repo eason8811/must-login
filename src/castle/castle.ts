@@ -500,7 +500,9 @@ function disableResourceLoading(window: CastleWindow): void {
     enableCSSFileLoading: false,
     disableCSSFileLoading: true,
     enableImageFileLoading: false,
-    enableIframePageLoading: false,
+    // 允许 iframe 创建并加载页面
+    enableIframePageLoading: true,
+    disableIframePageLoading: false,
     handleDisabledFileLoadingAsSuccess: true,
   };
   for (const [name, value] of Object.entries(overrides)) {
