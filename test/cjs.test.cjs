@@ -6,13 +6,35 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const test = require('node:test');
 
-const { generateSign, generateCastleToken } = require('../dist/index.cjs');
+const { generateSign, generateCastleToken, getAuthorizationToken } = require('../dist/index.cjs');
 
 test('CommonJS require resolves the public SDK tool', async () => {
   assert.equal(typeof generateSign, 'function');
   assert.equal(typeof generateCastleToken, 'function');
+  assert.equal(typeof getAuthorizationToken, 'function');
   await assert.rejects(generateSign(), /allowRemoteSdkExecution/);
   await assert.rejects(generateCastleToken(), /allowRemoteSdkExecution/);
+});
+
+test('CommonJS require extracts Authorization through the hashed Entry import without SDK execution', async () => {
+  const entry = 'https://abs.twimg.com/x-web/x-web/entry-client-logged-out-BadkwjBO.js';
+  const chunk = 'https://abs.twimg.com/x-web/x-web/assets/DFhr1Vbc.js';
+  const files = new Map([
+    ['https://x.com/', [`<html><script>var entryHref = "${entry}"</script></html>`, 'text/html']],
+    [entry, ['import { foo } from "./assets/DFhr1Vbc.js";', 'text/javascript']],
+    [chunk, ['const map = new Map();map.set(`Authorization`, `Bearer AAAAA_CJS_TEST%3D`);', 'text/javascript']],
+  ]);
+  const authorization = await getAuthorizationToken({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    fetch: async url => {
+      const file = files.get(String(url));
+      assert.ok(file, `Unexpected URL: ${url}`);
+      const result = new Response(file[0], { headers: { 'content-type': file[1] } });
+      Object.defineProperty(result, 'url', { value: String(url) });
+      return result;
+    },
+  });
+  assert.equal(authorization, 'Bearer AAAAA_CJS_TEST%3D');
 });
 
 test('CommonJS require can execute the complete offline SDK chain', async () => {

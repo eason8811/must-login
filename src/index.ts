@@ -3,3 +3,5 @@ export { generateSign, generateSignForUrl, shouldGenerateSign } from './sign/sig
 export type { SignLogDetails, SignLogger, SignLogLevel, SignOptions } from './sign/sign.js';
 export { generateCastleToken } from './castle/castle.js';
 export type { CastleLogger, CastleOptions } from './castle/castle.js';
+export { getAuthorizationToken } from './authorization/authorization.js';
+export type { AuthorizationLogger, AuthorizationOptions } from './authorization/authorization.js';
