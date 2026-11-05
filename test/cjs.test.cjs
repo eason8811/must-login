@@ -21,6 +21,7 @@ test('CommonJS require can execute the complete offline SDK chain', async () => 
   const decoy = 'https://abs.twimg.com/x-web/x-web/assets/BFxGKRfh.js';
   const startup = 'https://abs.twimg.com/x-web/x-web/assets/dSSXoMgG.js';
   const sdk = 'https://abs.twimg.com/x-web/x-web/assets/CYgkI3Mb.js';
+  const runtime = 'https://abs.twimg.com/x-web/x-web/assets/B644W4is.js';
   const svgs = Array.from({ length: 4 }, (_, i) =>
     `<svg id="loading-x-anim-${i}"><g><rect/><path d="M0 0"/></g></svg>`,
   ).join('');
@@ -37,7 +38,12 @@ test('CommonJS require can execute the complete offline SDK chain', async () => 
       'function Qm(e){return e === `jf.x.com` || e.endsWith(`.jf.x.com`) ? `PATCH` : `GET`}',
       'text/javascript',
     ]],
-    [sdk, ['export default () => (input, method) => `${input}-${method}`;', 'text/javascript']],
+    [sdk, [
+      'import { runtimeLoaded } from "./B644W4is.js";\n' +
+      'export default () => (input, method) => runtimeLoaded ? `${input}-${method}` : "MISSING_RUNTIME";',
+      'text/javascript',
+    ]],
+    [runtime, ['export const runtimeLoaded = true;', 'text/javascript']],
   ]);
   const logger = { info() {}, warn() {}, error() {}, debug() {} };
   try {

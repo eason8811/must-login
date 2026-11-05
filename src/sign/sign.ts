@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -9,6 +8,7 @@ import { CanvasAdapter } from '@happy-dom/node-canvas-adapter';
 import { init as initModuleLexer, parse as parseModule } from 'es-module-lexer';
 
 import { withExclusiveDom } from '../internal/dom-lock.js';
+import { persistSdkBundle } from '../internal/sdk-bundle.js';
 import { installAnimationComputedStyleBridge, type AnimationWindow } from './animation.js';
 
 /** Log severity exposed to consumers of the signing tool. */
@@ -74,7 +74,7 @@ export interface SignOptions {
   /** Extra headers for JavaScript CDN requests (overrides the built-in headers). */
   sdkHeaders?: Readonly<Record<string, string>>;
   /**
-   * Directory used for content-addressed SDK module snapshots.
+   * Directory used for isolated SDK module graphs.
    * Default: a private `must-login-sign` directory under the OS temp directory.
    */
   cacheDirectory?: string;
@@ -98,7 +98,7 @@ interface ResolvedSignOptions {
   htmlHeaders: Readonly<Record<string, string>>;
   /** SDK request header overrides. */
   sdkHeaders: Readonly<Record<string, string>>;
-  /** Absolute snapshot cache path. */
+/** Absolute SDK module-graph cache path. */
   cacheDirectory: string;
   /** Logger selected for this call. */
   logger: SignLogger;
@@ -510,26 +510,6 @@ async function discoverSdk(html: string, options: ResolvedSignOptions): Promise<
 }
 
 /**
- * Persist SDK bytes under a content-addressed `.mjs` path.
- * @param asset - Validated SDK source and fingerprint.
- * @param cacheDirectory - Directory for the local module snapshot.
- * @returns Absolute path to the verified module file.
- * @throws {Error} If an existing file has an unexpected fingerprint.
- */
-async function persistSdk(asset: CdnAsset, cacheDirectory: string): Promise<string> {
-  const filePath = resolve(cacheDirectory, `sdk-${asset.hash}.mjs`);
-  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
-  try {
-    await writeFile(filePath, asset.content, { flag: 'wx', mode: 0o600 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    const existing = await readFile(filePath);
-    if (sha256(existing) !== asset.hash) throw new Error('SDK 缓存内容与预期 SHA-256 不一致');
-  }
-  return filePath;
-}
-
-/**
  * Disable automatic resource execution and fetching in Happy DOM.
  * @param window - Registered Happy DOM browser window.
  * @returns Nothing.
@@ -544,9 +524,7 @@ function disableAutomaticResourceLoading(window: SignBrowserWindow): void {
     enableCSSFileLoading: false,
     disableCSSFileLoading: true,
     enableImageFileLoading: false,
-    // 允许 iframe 创建并加载页面
     enableIframePageLoading: true,
-    disableIframePageLoading: false,
     handleDisabledFileLoadingAsSuccess: true,
   };
   for (const [key, value] of Object.entries(overrides)) {
@@ -581,7 +559,7 @@ function validateSignatureDom(document: Document): { svgCount: number; selectedP
 
 /**
  * Import a fresh SDK instance and invoke its asynchronous factory.
- * @param filePath - Absolute path to the content-verified SDK snapshot.
+ * @param filePath - Absolute path to the SDK entry in a verified local module graph.
  * @param options - Runtime options used for diagnostics.
  * @returns Signer function created by the SDK initializer.
  * @throws {TypeError} If the SDK exports do not match the expected contract.
@@ -664,8 +642,12 @@ export async function generateSign(
       const html = await fetchHtml(settings);
       const discovery = await discoverSdk(html, settings);
       const asset = await fetchAsset(discovery.sdkUrl, 'sdk', discovery.referer, settings);
-      const sdkPath = await persistSdk(asset, settings.cacheDirectory);
-      settings.logger.info('SDK 下载完成', { sha256: asset.hash.slice(0, 12) });
+      const sdkPath = await persistSdkBundle(asset, {
+        cacheDirectory: settings.cacheDirectory,
+        fetchDependency: (url, referer) => fetchAsset(url, 'sdk', referer, settings),
+        debug: (message, details) => debug(settings, `Sign ${message}`, details),
+      });
+      settings.logger.info('SDK 及依赖下载完成', { sha256: asset.hash.slice(0, 12) });
 
       // Every network operation must finish before registering Happy DOM. Its
       // global AbortSignal is not compatible with the native Undici fetch.

@@ -27,6 +27,7 @@ test('ESM import fetches the paired SDK and produces a sign with quiet logs', as
   const decoyUrl = 'https://abs.twimg.com/x-web/x-web/assets/BMpThmqI.js';
   const startupUrl = 'https://abs.twimg.com/x-web/x-web/assets/dSSXoMgG.js';
   const sdkUrl = 'https://abs.twimg.com/x-web/x-web/assets/CYgkI3Mb.js';
+  const runtimeUrl = 'https://abs.twimg.com/x-web/x-web/assets/B644W4is.js';
   const data = new Map([
     ['https://x.com/', [fixtureHtml(entryUrl), 'text/html']],
     [entryUrl, [
@@ -41,7 +42,14 @@ test('ESM import fetches the paired SDK and produces a sign with quiet logs', as
       'function Qm(e) { return e === `jf.x.com` || e.endsWith(`.jf.x.com`) ? `PATCH` : `GET`; }',
       'text/javascript',
     ]],
-    [sdkUrl, ['export default async function () { return (input, method) => `${input}|${method}`; }', 'text/javascript']],
+    [sdkUrl, [
+      'import { capturedWindow } from "./B644W4is.js";\n' +
+      'export default async function () {' +
+      ' return (input, method) => capturedWindow === globalThis.window ? `${input}|${method}` : "STALE_DOM";' +
+      '}',
+      'text/javascript',
+    ]],
+    [runtimeUrl, ['export const capturedWindow = globalThis.window;', 'text/javascript']],
   ]);
   const logs = [];
   const logger = {

@@ -145,7 +145,7 @@ generateSignForUrl(
 | `signTimeoutMs` | `number` | `15000` | SDK 签名 Promise 超时，毫秒 |
 | `htmlHeaders` | `Record<string,string>` | `{}` | HTML 请求 Header 覆盖项 |
 | `sdkHeaders` | `Record<string,string>` | `{}` | CDN JavaScript 请求 Header 覆盖项 |
-| `cacheDirectory` | `string` | 系统临时目录下的 `must-login-sign` | SDK 快照缓存目录 |
+| `cacheDirectory` | `string` | 系统临时目录下的 `must-login-sign` | Sign SDK 及其 ESM 依赖的本地运行快照目录；每次调用创建独立子目录 |
 | `logger` | `SignLogger` | 控制台 | 自定义日志输出端 |
 | `fetch` | `typeof globalThis.fetch` | Node 原生 fetch | 可注入网络实现，便于配置网络出口或离线测试 |
 
@@ -218,7 +218,7 @@ https://x.com/ HTML
 - **Castle**：检查 Entry 的直接静态依赖，以 `responsive_web_castle_sdk_enabled`、`getStringValue('responsive_web_castle_public_key')`、`configure({ pk })` 识别唯一调用模块；从该模块静态依赖中的配置对象读取唯一公钥，并解析调用链中的 SDK 动态导入。
 - **匹配边界**：静态依赖使用 `es-module-lexer` 解析，排除 Vite 预加载映射中仅作为字符串出现的文件名；发现多个匹配项或未发现匹配项时会抛错。下载目标限制在预期的 HTTPS CDN 资源路径。
 
-Castle SDK 本身也可能通过 ESM `import` 引用独立的运行时文件（例如原先命名为 `rolldown-runtime-*.js` 的模块）。当前实现会继续解析 Castle SDK 的静态导入、重新导出及可确定文件名的动态导入，递归下载依赖，并在本地保留原始文件名与相对引用关系。非字面量动态导入、超出受限 CDN 路径的引用以及超出数量/大小限制的依赖图不会被自动处理。
+Sign 和 Castle SDK 都可能通过 ESM `import` 引用独立的运行时文件（例如原先命名为 `rolldown-runtime-*.js` 的模块）。两者现在共用 `src/internal/sdk-bundle.ts`：它会解析 SDK 的静态导入、重新导出及可确定文件名的动态导入，递归下载依赖，并在本地保留原始文件名与相对引用关系。非字面量动态导入、超出受限 CDN 路径的引用以及超出数量/大小限制的依赖图不会被自动处理。
 
 当前两套实现分别执行发现流程，**不会共用网络请求结果**。资源哈希文件和公钥会随着 X 的构建或配置变化自动重新发现；若上游代码结构发生变化，仍可能需要更新特征匹配逻辑。
 
@@ -258,9 +258,9 @@ Castle SDK 本身也可能通过 ESM `import` 引用独立的运行时文件（�
 
 ## 重要运行特征
 
-1. **每次重新发现**：调用 Sign 或 Castle 均会请求最新 HTML 和相关 CDN 资源。Sign SDK 采用 SHA-256 命名的本地模块缓存；Castle SDK 会连同 ESM 依赖保存到按 SDK 哈希标记的独立运行子目录。上游资源发布并非原子事务，极端情况下可能获取到跨版本文件。
+1. **每次重新发现**：调用 Sign 或 Castle 均会请求最新 HTML 和相关 CDN 资源。两套 SDK 都会连同 ESM 依赖保存到按主 SDK 哈希标记的独立运行子目录。上游资源发布并非原子事务，极端情况下可能获取到跨版本文件。
 2. **共享全局 DOM 锁**：Happy DOM 注册时会修改 Node 的 `globalThis`。同一模块实例内，Sign 和 Castle 使用同一异步锁串行执行，并在各自结束后注销环境。它不能替进程内其他未使用该锁的 DOM 库提供隔离，也不能跨 ESM/CJS 独立装载实例或 Node 进程协调。
-3. **动态导入不复用旧 DOM**：SDK 入口每次导入都会附带不同的模块 URL 查询参数；Castle 的整个 ESM 依赖图还会使用独立本地目录，避免子模块复用旧 DOM。高频使用会增加模块缓存与 Castle 临时文件占用，需要定期清理过期运行子目录；后续可考虑进程或 Worker 级隔离、会话复用及共享资源缓存。
+3. **动态导入不复用旧 DOM**：SDK 入口每次导入都会附带不同的模块 URL 查询参数；Sign 和 Castle 的整个 ESM 依赖图还会使用独立本地目录，避免子模块复用旧 DOM。高频使用会增加模块缓存与临时文件占用，需要定期清理过期运行子目录；后续可考虑进程或 Worker 级隔离、会话复用及共享资源缓存。
 4. **超时不等于中止**：`signTimeoutMs`、`tokenTimeoutMs` 仅限制等待结果的时间，不能终止已经运行的第三方 SDK。若需要严格的 CPU、内存和执行时间隔离，应在独立进程中运行并实现硬超时。
 5. **下载代码存在执行风险**：即使限制了资源的来源域名和路径，实际执行的仍是远程第三方 JavaScript。只有明确接受风险时才设置 `allowRemoteSdkExecution: true`。
 6. **真实环境验证仍然必要**：仓库的自动化测试使用离线 HTML、SDK 和公钥模拟数据，覆盖 ESM/CJS、资源歧义拒绝及 Sign/Castle 并发串行化；**这并不等同于验证最新线上 SDK 真实签名或 Token 可用性**。
