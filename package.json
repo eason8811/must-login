@@ -33,8 +33,8 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typecheck:consumer": "tsc --noEmit -p tsconfig.consumer.json",
-    "test": "pnpm run build && node --test",
-    "check": "pnpm run typecheck && pnpm run build && pnpm run typecheck:consumer && node --test",
+    "test": "pnpm run build && node --test \"test/*.test.cjs\" \"test/*.test.mjs\"",
+    "check": "pnpm run typecheck && pnpm run build && pnpm run typecheck:consumer && node --test \"test/*.test.cjs\" \"test/*.test.mjs\"",
     "prepack": "pnpm run check"
   },
   "devDependencies": {

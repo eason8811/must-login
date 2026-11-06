@@ -11,6 +11,6 @@ const requestSignature: Promise<string | undefined> = login.generateSignForUrl('
 void requestSignature;
 const castleToken: Promise<string> = login.generateCastleToken({ allowRemoteSdkExecution: true });
 void castleToken;
-const authorizationOptions: login.AuthorizationOptions = { verbose: true };
+const authorizationOptions: login.AuthorizationOptions = { verbose: true, cacheDirectory: 'temporary-cache' };
 const authorization: Promise<string> = login.getAuthorizationToken(authorizationOptions);
 void authorization;

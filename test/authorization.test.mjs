@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { getAuthorizationToken } from '../dist/index.js';
@@ -29,8 +33,11 @@ function makeFixtures(chunkContent, secondChunkContent = 'export const unrelated
     [second, [secondChunkContent, 'text/javascript']],
   ]);
   const requests = [];
+  const cacheDirectory = mkdtempSync(join(tmpdir(), 'must-login-auth-unit-'));
   return {
     requests,
+    cacheDirectory,
+    cleanup: () => rm(cacheDirectory, { recursive: true, force: true }),
     fetch: async url => {
       requests.push(String(url));
       const fixture = fixtures.get(String(url));
@@ -51,7 +58,7 @@ function collectLogger() {
   };
 }
 
-test('ESM extracts a fixed Bearer from a direct static Entry import without executing JS', async () => {
+test('ESM extracts a fixed Bearer from a direct static Entry import without executing JS', async t => {
   const token = 'Bearer AAAAAAAAAA_SECRET_SAMPLE%3D123';
   const chain = makeFixtures([
     'globalThis.__mustLoginAuthorizationProbeExecuted = true;',
@@ -61,9 +68,10 @@ test('ESM extracts a fixed Bearer from a direct static Entry import without exec
     ' return headers;',
     '}',
   ].join('\n'));
+  t.after(chain.cleanup);
   const { events, logger } = collectLogger();
   try {
-    const authorization = await getAuthorizationToken({ fetch: chain.fetch, logger });
+    const authorization = await getAuthorizationToken({ fetch: chain.fetch, logger, cacheDirectory: chain.cacheDirectory });
     assert.equal(authorization, token);
     assert.equal(globalThis.__mustLoginAuthorizationProbeExecuted, undefined);
     assert.equal(chain.requests.length, 5);
@@ -75,32 +83,35 @@ test('ESM extracts a fixed Bearer from a direct static Entry import without exec
   }
 });
 
-test('verbose mode logs resource metadata but never logs the Authorization value', async () => {
+test('verbose mode logs resource metadata but never logs the Authorization value', async t => {
   const chain = makeFixtures('const m = new Map(); m.set("Authorization", "Bearer SAMPLE_987%3D");');
+  t.after(chain.cleanup);
   const { events, logger } = collectLogger();
-  const token = await getAuthorizationToken({ fetch: chain.fetch, logger, verbose: true });
+  const token = await getAuthorizationToken({ fetch: chain.fetch, logger, verbose: true, cacheDirectory: chain.cacheDirectory });
   assert.equal(token, 'Bearer SAMPLE_987%3D');
   assert.equal(events.some(event => event.level === 'debug'), true);
   assert.equal(JSON.stringify(events).includes('Bearer SAMPLE_987%3D'), false);
 });
 
-test('ambiguous hardcoded Authorization assignments are rejected', async () => {
+test('ambiguous hardcoded Authorization assignments are rejected', async t => {
   const chain = makeFixtures(
     'const x = new Map(); x.set("Authorization", "Bearer FIRST_123");',
     'const y = new Map(); y.set("Authorization", "Bearer SECOND_456");',
   );
+  t.after(chain.cleanup);
   const { logger } = collectLogger();
   await assert.rejects(
-    getAuthorizationToken({ fetch: chain.fetch, logger }),
+    getAuthorizationToken({ fetch: chain.fetch, logger, cacheDirectory: chain.cacheDirectory }),
     /无法唯一确定 Authorization Token，匹配数量：2/,
   );
 });
 
-test('missing Authorization assignment is rejected; Vite preload strings are not fetched', async () => {
+test('missing Authorization assignment is rejected; Vite preload strings are not fetched', async t => {
   const chain = makeFixtures('export const b = "Bearer is absent from Authorization Map";');
+  t.after(chain.cleanup);
   const { logger } = collectLogger();
   await assert.rejects(
-    getAuthorizationToken({ fetch: chain.fetch, logger }),
+    getAuthorizationToken({ fetch: chain.fetch, logger, cacheDirectory: chain.cacheDirectory }),
     /无法唯一确定 Authorization Token，匹配数量：0/,
   );
   assert.equal(chain.requests.some(url => url.includes('ignore-preload')), false);

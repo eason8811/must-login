@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { generateCastleToken, generateSign } from '../dist/index.js';
+import { generateCastleToken, generateSign, getAuthorizationToken } from '../dist/index.js';
 
 /** Create a fetch-compatible response with its real source URL. */
 function response(url, source, type = 'text/javascript') {
@@ -174,25 +174,35 @@ test('Castle rejects an SDK dependency that escapes the restricted CDN path', as
 });
 
 test('Castle rejects ambiguous Startup and conflicting pk candidates', async () => {
+  const firstDirectory = await mkdtemp(join(tmpdir(), 'must-login-castle-ambiguous-startup-'));
+  const secondDirectory = await mkdtemp(join(tmpdir(), 'must-login-castle-ambiguous-pk-'));
   const logger = { info() {}, warn() {}, error() {}, debug() {} };
-  const startup = castleFixtures({ duplicateStartup: true });
-  await assert.rejects(generateCastleToken({
-    allowRemoteSdkExecution: true,
-    fetch: fetchFor(startup.fixture),
-    logger,
-  }), /无法唯一匹配 Castle Startup：2/);
+  try {
+    const startup = castleFixtures({ duplicateStartup: true });
+    await assert.rejects(generateCastleToken({
+      allowRemoteSdkExecution: true,
+      cacheDirectory: firstDirectory,
+      fetch: fetchFor(startup.fixture),
+      logger,
+    }), /无法唯一匹配 Castle Startup：2/);
 
-  const keys = castleFixtures({ duplicateKey: true });
-  await assert.rejects(generateCastleToken({
-    allowRemoteSdkExecution: true,
-    fetch: fetchFor(keys.fixture),
-    logger,
-  }), /无法唯一匹配 Castle 公钥：2/);
+    const keys = castleFixtures({ duplicateKey: true });
+    await assert.rejects(generateCastleToken({
+      allowRemoteSdkExecution: true,
+      cacheDirectory: secondDirectory,
+      fetch: fetchFor(keys.fixture),
+      logger,
+    }), /无法唯一匹配 Castle 公钥：2/);
+  } finally {
+    await Promise.all([firstDirectory, secondDirectory].map(directory => rm(directory, { recursive: true, force: true })));
+  }
 });
 
 test('Castle and Sign share a lock over the global Happy DOM environment', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'must-login-castle-lock-'));
   const { fixture, key } = castleFixtures();
+  const configUrl = 'https://abs.twimg.com/x-web/x-web/assets/BMpThmqI.js';
+  fixture.set(configUrl, [fixture.get(configUrl)[0] + '\nconst m = new Map(); m.set(`Authorization`, `Bearer SHARED_CACHE_TOKEN`);']);
   const signUrl = 'https://abs.twimg.com/x-web/x-web/assets/CYgkI3Mb.js';
   const startupUrl = 'https://abs.twimg.com/x-web/x-web/assets/dSSXoMgG.js';
   const originalStartup = fixture.get(startupUrl)[0];
@@ -204,14 +214,34 @@ test('Castle and Sign share a lock over the global Happy DOM environment', async
   ).join('');
   fixture.set('https://x.com/', [html.replace('</head>', '<meta name="twitter-site-verification" content="YWJjZGVmZ2g="/></head>').replace('</body>', `${svg}</body>`), 'text/html']);
   const logger = { info() {}, warn() {}, error() {}, debug() {} };
+  const requests = [];
+  const backend = fetchFor(fixture);
+  const fetch = async url => {
+    requests.push(String(url));
+    return backend(url);
+  };
   try {
-    const common = { allowRemoteSdkExecution: true, fetch: fetchFor(fixture), cacheDirectory: directory, logger };
-    const [castle, sign] = await Promise.all([
+    const common = { allowRemoteSdkExecution: true, fetch, cacheDirectory: directory, logger };
+    const run = () => Promise.all([
       generateCastleToken(common),
       generateSign('jf', 'PATCH', common),
+      getAuthorizationToken({ fetch, cacheDirectory: directory, logger }),
     ]);
+    const [castle, sign, authorization] = await run();
     assert.equal(castle, `castle-token:${key}`);
     assert.equal(sign, 'jf:PATCH');
+    assert.equal(authorization, 'Bearer SHARED_CACHE_TOKEN');
+
+    const countsBefore = new Map(requests.map(url => [url, requests.filter(value => value === url).length]));
+    assert.equal(countsBefore.get('https://x.com/'), 3);
+    assert.equal(countsBefore.get('https://abs.twimg.com/x-web/x-web/entry-client-logged-out-BadkwjBO.js'), 1);
+    assert.equal([...countsBefore].filter(([url, count]) => url !== 'https://x.com/' && count !== 1).length, 0);
+
+    assert.deepEqual(await run(), [castle, sign, authorization], 'Cached SDK source must remain usable with fresh DOM sessions');
+    assert.equal(requests.filter(url => url === 'https://x.com/').length, 6, 'Every tool invocation must refetch HTML');
+    for (const [url, count] of countsBefore) {
+      if (url !== 'https://x.com/') assert.equal(requests.filter(value => value === url).length, count, `${url} should remain cached`);
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

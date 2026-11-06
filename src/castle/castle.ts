@@ -7,6 +7,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { CanvasAdapter } from '@happy-dom/node-canvas-adapter';
 import { init as initModuleLexer, parse as parseModule } from 'es-module-lexer';
 
+import { fetchCachedCdnText } from '../internal/cdn-cache.js';
 import { withExclusiveDom } from '../internal/dom-lock.js';
 import { persistSdkBundle } from '../internal/sdk-bundle.js';
 import type { SignLogger } from '../sign/sign.js';
@@ -33,7 +34,7 @@ export interface CastleOptions {
   htmlHeaders?: Readonly<Record<string, string>>;
   /** Additional HTTP headers for requests to the X CDN. */
   sdkHeaders?: Readonly<Record<string, string>>;
-  /** Directory for isolated SDK module graphs. Default: `must-login-castle` under the OS temporary folder. */
+  /** Root for reusable CDN resources and isolated SDK module graphs. Default: `must-login-castle` under the OS temporary folder. */
   cacheDirectory?: string;
   /** Optional logger. Verbose events are emitted through its `debug` method only. */
   logger?: CastleLogger;
@@ -279,7 +280,7 @@ async function fetchHtml(options: ResolvedCastleOptions): Promise<string> {
 }
 
 /**
- * Fetch an immutable CDN JavaScript file, disallowing redirects.
+ * Load an immutable CDN JavaScript file from cache or download it.
  * @param input - Previously discovered asset URL.
  * @param kind - Expected asset kind.
  * @param referer - Parent resource URL for the fetch headers.
@@ -288,22 +289,28 @@ async function fetchHtml(options: ResolvedCastleOptions): Promise<string> {
  */
 async function fetchAsset(input: URL | string, kind: CastleAssetKind, referer: string, options: ResolvedCastleOptions): Promise<CastleAsset> {
   const url = validateAssetUrl(input, kind);
-  const response = await options.fetch(url.href, {
-    headers: requestHeaders(options, referer),
-    redirect: 'manual',
-    signal: NATIVE_ABORT_SIGNAL.timeout(options.sdkFetchTimeoutMs),
+  const asset = await fetchCachedCdnText({
+    url,
+    cacheDirectory: options.cacheDirectory,
+    maxBytes: MAX_JS_BYTES,
+    debug: (message, details) => debug(options, message, details),
+    fetchRemote: async () => {
+      const response = await options.fetch(url.href, {
+        headers: requestHeaders(options, referer),
+        redirect: 'manual',
+        signal: NATIVE_ABORT_SIGNAL.timeout(options.sdkFetchTimeoutMs),
+      });
+      const finalUrl = validateAssetUrl(response.url, kind);
+      if (finalUrl.href !== url.href || !response.ok || response.redirected) {
+        throw new Error(`${kind} CDN 下载失败或发生重定向：HTTP ${response.status}`);
+      }
+      const contentType = response.headers.get('content-type') ?? '';
+      if (/text\/html|application\/json/i.test(contentType)) throw new Error(`${kind} 返回非 JS 数据`);
+      return readLimitedText(response, MAX_JS_BYTES);
+    },
   });
-  const finalUrl = validateAssetUrl(response.url, kind);
-  if (finalUrl.href !== url.href || !response.ok || response.redirected) {
-    throw new Error(`${kind} CDN 下载失败或发生重定向：HTTP ${response.status}`);
-  }
-  const contentType = response.headers.get('content-type') ?? '';
-  if (/text\/html|application\/json/i.test(contentType)) throw new Error(`${kind} 返回非 JS 数据`);
-  const content = await readLimitedText(response, MAX_JS_BYTES);
-  if (!content.trim()) throw new Error(`${kind} 内容为空`);
-  const asset = { url: finalUrl, content, hash: sha256(content) };
-  debug(options, 'CDN 下载成功', { kind, url: url.href, sha256: asset.hash, size: Buffer.byteLength(content) });
-  return asset;
+  debug(options, 'CDN 资源获取完成', { kind, url: url.href, sha256: asset.hash, size: asset.size, cacheHit: asset.fromCache });
+  return { url, content: asset.content, hash: asset.hash };
 }
 
 /**
@@ -514,7 +521,7 @@ export async function generateCastleToken(options: CastleOptions = {}): Promise<
         fetchDependency: (url, referer) => fetchAsset(url, 'chunk', referer, settings),
         debug: (message, details) => debug(settings, `Castle ${message}`, details),
       });
-      settings.logger.info('Castle SDK 及依赖下载完成', { sha256: asset.hash.slice(0, 12) });
+      settings.logger.info('Castle SDK 及依赖准备完成', { sha256: asset.hash.slice(0, 12) });
 
       // All HTTP work finishes before Happy DOM overrides Node global classes.
       GlobalRegistrator.register({ url: HTML_URL, width: 1920, height: 1080 });

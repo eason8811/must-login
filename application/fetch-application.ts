@@ -2,8 +2,9 @@ import {generateSignForUrl, type SignOptions} from '@must/login';
 import {generateCastleToken, type CastleOptions} from '@must/login';
 import {getAuthorizationToken, type AuthorizationOptions} from '@must/login';
 
-const options: SignOptions = {verbose: false, allowRemoteSdkExecution: true};
-const castleOptions: CastleOptions = {allowRemoteSdkExecution: true, verbose: false};
+const cacheDir = 'E:\\Code\\codes\\must-login\\temp';
+const options: SignOptions = {verbose: false, allowRemoteSdkExecution: true, cacheDirectory: cacheDir};
+const castleOptions: CastleOptions = {allowRemoteSdkExecution: true, verbose: false, cacheDirectory: cacheDir};
 const authorizationOptions: AuthorizationOptions = {verbose: false, fetchTimeoutMs: 15_000};
 
 const assetsUrl = 'https://jf.x.com/onboarding/web/actions/begin_login';
@@ -35,12 +36,12 @@ async function main() {
       'timezone': 'Asia/Shanghai',
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36',
       'x-client-transaction-id': normalizedRequestSignature,
-      'x-guest-token': '2118363370009284698',
+      'x-guest-token': '2118571137802084368',
       'x-jf-client-theme': 'dark',
       'x-jf-v': 'JP-5',
       'x-twitter-active-user': 'yes',
       'x-twitter-client-language': 'zh-cn',
-      'cookie': 'guest_id=v1%3A179208205565679855; __cuid=16c4f5b3-619c-4dad-b691-fb8712c1c250; __cf_bm=2AGp51vp09xhTFaGjXl34dVZE2WidGFKjZgdhWivqQM-1793892146.7123194-1.0.1.1-F2989FAiKh27VeoYD.EUamxKzJl15PviJTpEzSQrXxU.cqjSZ9UVOH37tIp_T2aOHm9m_sjD5nbpLO7AhgiIZjsRvIAzTIsfpmiisvbYBg1DZr3wGlfdcJPMdCC7TvjN; gt=2118363370009284698'
+      'cookie': 'gt=2118571137802084368; guest_id=v1%3A179394169504546514; __cf_bm=uTb60Em_CSHr5ISi.C_RTXXTXYpIaG5SIO1t0pQ9yZ8-1793941695.0256047-1.0.1.1-r1Wpq9TJRXuabWpCfwc2rYExhibk.aVezS.l6iIn2EHij6lzfveQicg0.011xVA3nCcPZSRwbLun2JKa82NPLYOXt.ahJpBiCWqCy9rpuZ_9l7pwBkL9Qm1jUTdQcnnx; __cuid=9f655789-d2bb-4659-9533-1d76aaf99e2d'
     },
     body: new URLSearchParams({
       'username_or_email': 'yanyan88111',

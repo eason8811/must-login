@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
 
 import { init as initModuleLexer, parse as parseModule } from 'es-module-lexer';
 
+import { fetchCachedCdnText } from '../internal/cdn-cache.js';
 import type { SignLogger } from '../sign/sign.js';
 
 /** Logger contract for Authorization discovery; identical to the Sign logger. */
@@ -24,6 +27,8 @@ export interface AuthorizationOptions {
   htmlHeaders?: Readonly<Record<string, string>>;
   /** Headers merged into the default CDN JavaScript request headers. */
   sdkHeaders?: Readonly<Record<string, string>>;
+  /** Directory containing cached JavaScript sources. Default: OS temporary directory `must-login-authorization`. */
+  cacheDirectory?: string;
   /** Optional application logger; the extracted Authorization value is never logged. */
   logger?: AuthorizationLogger;
   /** Optional fetch implementation for custom networking or offline tests. */
@@ -42,6 +47,8 @@ interface ResolvedAuthorizationOptions {
   htmlHeaders: Readonly<Record<string, string>>;
   /** CDN request header overrides. */
   sdkHeaders: Readonly<Record<string, string>>;
+  /** Absolute root of the reusable Authorization CDN source cache. */
+  cacheDirectory: string;
   /** Selected lifecycle logger. */
   logger: AuthorizationLogger;
   /** Native or injected fetch implementation. */
@@ -114,6 +121,7 @@ function resolveOptions(options: AuthorizationOptions): ResolvedAuthorizationOpt
     sdkFetchTimeoutMs: validTimeout(options.sdkFetchTimeoutMs, 'sdkFetchTimeoutMs'),
     htmlHeaders: options.htmlHeaders ?? {},
     sdkHeaders: options.sdkHeaders ?? {},
+    cacheDirectory: resolve(options.cacheDirectory ?? resolve(tmpdir(), 'must-login-authorization')),
     logger: options.logger ?? {
       info(message, details) { console.info(`[Authorization] ${message}`, details ?? ''); },
       warn(message, details) { console.warn(`[Authorization] ${message}`, details ?? ''); },
@@ -240,7 +248,7 @@ async function fetchHtml(options: ResolvedAuthorizationOptions): Promise<string>
 }
 
 /**
- * Download a CDN module without permitting cross-origin redirects.
+ * Retrieve a CDN module from the source cache, downloading on cache misses.
  * @param input - Expected Entry or imported chunk URL.
  * @param kind - Role whose CDN path is validated.
  * @param referer - Parent source URL for request headers.
@@ -249,23 +257,29 @@ async function fetchHtml(options: ResolvedAuthorizationOptions): Promise<string>
  */
 async function fetchAsset(input: URL | string, kind: AuthorizationAssetKind, referer: string, options: ResolvedAuthorizationOptions): Promise<AuthorizationAsset> {
   const url = validateAssetUrl(input, kind);
-  const response = await options.fetch(url.href, {
-    headers: requestHeaders(options, referer),
-    redirect: 'manual',
-    signal: NATIVE_ABORT_SIGNAL.timeout(options.sdkFetchTimeoutMs),
+  const asset = await fetchCachedCdnText({
+    url,
+    cacheDirectory: options.cacheDirectory,
+    maxBytes: MAX_ASSET_BYTES,
+    debug: (message, details) => debug(options, message, details),
+    fetchRemote: async () => {
+      const response = await options.fetch(url.href, {
+        headers: requestHeaders(options, referer),
+        redirect: 'manual',
+        signal: NATIVE_ABORT_SIGNAL.timeout(options.sdkFetchTimeoutMs),
+      });
+      const finalUrl = validateAssetUrl(response.url, kind);
+      if (finalUrl.href !== url.href || !response.ok || response.redirected) {
+        throw new Error(`${kind} 下载失败或重定向：HTTP ${response.status}`);
+      }
+      if (/text\/html|application\/json/i.test(response.headers.get('content-type') ?? '')) {
+        throw new Error(`${kind} 返回了非 JavaScript 内容`);
+      }
+      return readLimitedText(response, MAX_ASSET_BYTES);
+    },
   });
-  const finalUrl = validateAssetUrl(response.url, kind);
-  if (finalUrl.href !== url.href || !response.ok || response.redirected) {
-    throw new Error(`${kind} 下载失败或重定向：HTTP ${response.status}`);
-  }
-  if (/text\/html|application\/json/i.test(response.headers.get('content-type') ?? '')) {
-    throw new Error(`${kind} 返回了非 JavaScript 内容`);
-  }
-  const content = await readLimitedText(response, MAX_ASSET_BYTES);
-  if (!content.trim()) throw new Error(`${kind} 内容为空`);
-  const asset = { url: finalUrl, content, hash: sha256(content) };
-  debug(options, 'CDN 资源获取完成', { kind, url: url.href, sha256: asset.hash, size: Buffer.byteLength(content) });
-  return asset;
+  debug(options, 'CDN 资源获取完成', { kind, url: url.href, sha256: asset.hash, size: asset.size, cacheHit: asset.fromCache });
+  return { url, content: asset.content, hash: asset.hash };
 }
 
 /**

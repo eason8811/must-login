@@ -7,6 +7,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { CanvasAdapter } from '@happy-dom/node-canvas-adapter';
 import { init as initModuleLexer, parse as parseModule } from 'es-module-lexer';
 
+import { fetchCachedCdnText } from '../internal/cdn-cache.js';
 import { withExclusiveDom } from '../internal/dom-lock.js';
 import { persistSdkBundle } from '../internal/sdk-bundle.js';
 import { installAnimationComputedStyleBridge, type AnimationWindow } from './animation.js';
@@ -74,7 +75,7 @@ export interface SignOptions {
   /** Extra headers for JavaScript CDN requests (overrides the built-in headers). */
   sdkHeaders?: Readonly<Record<string, string>>;
   /**
-   * Directory used for isolated SDK module graphs.
+   * Directory containing reusable raw CDN sources and isolated SDK module graphs.
    * Default: a private `must-login-sign` directory under the OS temp directory.
    */
   cacheDirectory?: string;
@@ -98,7 +99,7 @@ interface ResolvedSignOptions {
   htmlHeaders: Readonly<Record<string, string>>;
   /** SDK request header overrides. */
   sdkHeaders: Readonly<Record<string, string>>;
-/** Absolute SDK module-graph cache path. */
+  /** Absolute root for raw CDN cache records and per-run SDK module graphs. */
   cacheDirectory: string;
   /** Logger selected for this call. */
   logger: SignLogger;
@@ -375,7 +376,7 @@ async function fetchHtml(options: ResolvedSignOptions): Promise<string> {
 }
 
 /**
- * Download a validated CDN asset without following redirects.
+ * Resolve a CDN asset from the persistent source cache or download it.
  * @param urlInput - URL from the validated discovery chain.
  * @param kind - Expected asset role in the chain.
  * @param referer - Parent module URL for the request header.
@@ -390,22 +391,30 @@ async function fetchAsset(
   options: ResolvedSignOptions,
 ): Promise<CdnAsset> {
   const requested = validateCdnAssetUrl(urlInput, kind);
-  const response = await options.fetch(requested.href, {
-    headers: sdkRequestHeaders(options, referer),
-    redirect: 'manual',
-    signal: NATIVE_ABORT_SIGNAL.timeout(options.sdkFetchTimeoutMs),
+  const asset = await fetchCachedCdnText({
+    url: requested,
+    cacheDirectory: options.cacheDirectory,
+    maxBytes: MAX_ASSET_BYTES,
+    debug: (message, details) => debug(options, message, details),
+    fetchRemote: async () => {
+      const response = await options.fetch(requested.href, {
+        headers: sdkRequestHeaders(options, referer),
+        redirect: 'manual',
+        signal: NATIVE_ABORT_SIGNAL.timeout(options.sdkFetchTimeoutMs),
+      });
+      const finalUrl = validateCdnAssetUrl(response.url, kind);
+      if (finalUrl.href !== requested.href || !response.ok || response.redirected) {
+        throw new Error(`${kind} 下载失败或发生重定向：HTTP ${response.status}`);
+      }
+      const contentType = response.headers.get('content-type') ?? '';
+      if (/text\/html|application\/json/i.test(contentType)) {
+        throw new Error(`${kind} 返回了非 JavaScript 内容（${contentType}）`);
+      }
+      return readLimitedText(response, MAX_ASSET_BYTES);
+    },
   });
-  const finalUrl = validateCdnAssetUrl(response.url, kind);
-  if (!response.ok || response.redirected) throw new Error(`${kind} 下载失败：HTTP ${response.status}`);
-  const contentType = response.headers.get('content-type') ?? '';
-  if (/text\/html|application\/json/i.test(contentType)) {
-    throw new Error(`${kind} 返回了非 JavaScript 内容（${contentType}）`);
-  }
-  const content = await readLimitedText(response, MAX_ASSET_BYTES);
-  if (!content.trim()) throw new Error(`${kind} 内容为空`);
-  const asset: CdnAsset = { url: finalUrl, content, size: Buffer.byteLength(content), hash: sha256(content) };
-  debug(options, 'CDN 资源获取完成', { kind, url: finalUrl.href, size: asset.size, sha256: asset.hash });
-  return asset;
+  debug(options, 'CDN 资源获取完成', { kind, url: requested.href, size: asset.size, sha256: asset.hash, cacheHit: asset.fromCache });
+  return { url: requested, content: asset.content, size: asset.size, hash: asset.hash };
 }
 
 /** Maximum number of direct Entry imports eligible for Startup inspection. */
@@ -647,7 +656,7 @@ export async function generateSign(
         fetchDependency: (url, referer) => fetchAsset(url, 'sdk', referer, settings),
         debug: (message, details) => debug(settings, `Sign ${message}`, details),
       });
-      settings.logger.info('SDK 及依赖下载完成', { sha256: asset.hash.slice(0, 12) });
+      settings.logger.info('SDK 及依赖准备完成', { sha256: asset.hash.slice(0, 12) });
 
       // Every network operation must finish before registering Happy DOM. Its
       // global AbortSignal is not compatible with the native Undici fetch.

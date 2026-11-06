@@ -13,6 +13,6 @@ void requestSignature;
 const castleOptions: CastleOptions = { allowRemoteSdkExecution: true, verbose: false };
 const castleToken: Promise<string> = generateCastleToken(castleOptions);
 void castleToken;
-const authorizationOptions: AuthorizationOptions = { verbose: false, fetchTimeoutMs: 15_000 };
+const authorizationOptions: AuthorizationOptions = { verbose: false, fetchTimeoutMs: 15_000, cacheDirectory: '/tmp/must-login-authorization' };
 const authorization: Promise<string> = getAuthorizationToken(authorizationOptions);
 void authorization;
